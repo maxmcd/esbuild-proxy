@@ -147,6 +147,8 @@ func main() {
 			path := strings.TrimPrefix(r.URL.Path, "/")
 			fullURL := path + "?" + r.URL.RawQuery
 			originalURL := fullURL
+			start := time.Now()
+			slog.Info("starting bundle process", "url", fullURL)
 
 			// Get final redirect location
 			client := &http.Client{
@@ -193,9 +195,11 @@ func main() {
 
 			cachePath := ".cache/" + hash
 			if _, err := os.Stat(cachePath); err == nil {
+				slog.Info("cache hit", "hash", hash, "duration", time.Since(start))
 				serveBundle(w, r, hash)
 				return
 			}
+			slog.Info("cache miss", "hash", hash, "duration", time.Since(start))
 
 			// Cache miss - read response and build
 			content, err := io.ReadAll(resp.Body)
@@ -203,11 +207,7 @@ func main() {
 				sendError(w, "Failed to read response: "+err.Error(), err)
 				return
 			}
-
-			// Create new response with cached content
 			resp.Body.Close()
-			resp.Body = io.NopCloser(strings.NewReader(string(content)))
-			defer resp.Body.Close()
 
 			// Create temp directory
 			tmpDir, err := os.MkdirTemp("", "vite-build-*")
@@ -215,8 +215,6 @@ func main() {
 				sendError(w, "Failed to create temp dir: "+err.Error(), err)
 				return
 			}
-			// defer os.RemoveAll(tmpDir)
-			fmt.Println(tmpDir)
 			// Create src directory
 			srcDir := tmpDir + "/src"
 			if err := os.MkdirAll(srcDir, 0755); err != nil {
@@ -224,8 +222,10 @@ func main() {
 				return
 			}
 
+			fmt.Println(tmpDir)
+
 			// Copy package files
-			for _, file := range []string{"package.json", "package-lock.json", "tsconfig.json", "vite.config.ts"} {
+			for _, file := range []string{"package.json", "bun.lock", "tsconfig.json"} {
 				content, err := os.ReadFile(file)
 				if err != nil {
 					sendError(w, "Failed to read "+file+": "+err.Error(), err)
@@ -245,21 +245,16 @@ func main() {
 			// 	return
 			// }
 
-			// Write downloaded content to src/index.ts
-			content, err = io.ReadAll(resp.Body)
-			if err != nil {
-				sendError(w, "Failed to read response body: "+err.Error(), err)
-				return
-			}
 			if err := os.WriteFile(srcDir+"/index.ts", content, 0644); err != nil {
 				sendError(w, "Failed to write index.ts: "+err.Error(), err)
 				return
 			}
-			fmt.Println(string(content))
+
+			slog.Info("running dependency check", "duration", time.Since(start))
 
 			// Run depcheck
 			var stdout, stderr bytes.Buffer
-			cmd := exec.Command("npx", "depcheck", "--json")
+			cmd := exec.Command("bunx", "depcheck", "--json", "src/index.ts")
 			cmd.Dir = tmpDir
 			cmd.Stdout = &stdout
 			cmd.Stderr = &stderr
@@ -285,15 +280,19 @@ func main() {
 				return
 			}
 
+			slog.Info("installed dependencies",
+				"missing_count", len(depcheck.Missing),
+				"duration", time.Since(start))
+
 			// Install missing dependencies
 			args := []string{"install"}
 			if len(depcheck.Missing) > 0 {
-				args = append(args, "-t")
+				args = append(args, "--save")
 			}
 			for pkg := range depcheck.Missing {
 				args = append(args, pkg)
 			}
-			cmd = exec.Command("npm", args...)
+			cmd = exec.Command("bun", args...)
 			cmd.Dir = tmpDir
 			stdout.Reset()
 			stderr.Reset()
@@ -302,25 +301,9 @@ func main() {
 			err = cmd.Run()
 			if err != nil {
 				if exitErr, ok := err.(*exec.ExitError); ok {
-					sendError(w, "npm install failed: "+stdout.String(), exitErr)
+					sendError(w, "bun install failed: "+stdout.String(), exitErr)
 				} else {
-					sendError(w, "npm install failed: "+err.Error(), err)
-				}
-				return
-			}
-
-			// Run build
-			cmd = exec.Command("npm", "run", "build")
-			cmd.Dir = tmpDir
-			stdout.Reset()
-			cmd.Stdout = &stdout
-			cmd.Stderr = &stdout
-			err = cmd.Run()
-			if err != nil {
-				if exitErr, ok := err.(*exec.ExitError); ok {
-					sendError(w, "Build failed: "+stdout.String(), exitErr)
-				} else {
-					sendError(w, "Build failed: "+err.Error(), err)
+					sendError(w, "bun install failed: "+err.Error(), err)
 				}
 				return
 			}
@@ -359,6 +342,19 @@ func main() {
 
 			// Redirect to URL with hash
 			serveBundle(w, r, hash)
+
+			// After dependency check
+			slog.Info("installed dependencies",
+				"missing_count", len(depcheck.Missing),
+				"duration", time.Since(start))
+
+			// After build
+			slog.Info("build completed", "duration", time.Since(start))
+
+			// After caching
+			slog.Info("bundle cached and ready to serve",
+				"size", len(bundle),
+				"total_duration", time.Since(start))
 		})),
 	}
 
