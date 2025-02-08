@@ -11,7 +11,7 @@ COPY main.go .
 RUN go build -o server main.go
 
 # Use a minimal alpine image for the final container
-FROM alpine:latest
+FROM oven/bun:1.0.5-alpine
 
 RUN apk add --no-cache \
     ca-certificates \
@@ -22,9 +22,9 @@ RUN apk add --no-cache \
 
 WORKDIR /opt
 
-COPY ./package.json ./package-lock.json ./
+COPY ./package.json ./bun.lock ./
 
-RUN npm ci
+RUN bun install
 
 COPY tsconfig.json vite.config.ts ./
 # Copy the binary from builder
